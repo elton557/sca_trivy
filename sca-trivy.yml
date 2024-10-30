@@ -1,0 +1,84 @@
+trivy_scan:
+  stage: trivy_scan
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - echo "Running Trivy scan..."
+    - apk add --no-cache jq msmtp  # Instala o jq e o msmtp para envio de e-mails
+    - export TRIVY_DISABLE_VEX_NOTICE=true
+    # Define o diretório de cache do Trivy
+    - export TRIVY_CACHE_DIR="/root/.docker/db-trivy"
+    # Executa o Trivy para exibir o resultado em formato de tabela
+    - trivy image --cache-dir $TRIVY_CACHE_DIR --server $SERVER_TRIVY --format table $NEXUS_URL_DEV/dsis-1/${CI_PROJECT_NAME}:$VERSION --scanners vuln > trivy_table.txt
+    # Executa o Trivy para gerar o relatório em JSON para análise
+    - trivy image --cache-dir $TRIVY_CACHE_DIR --server $SERVER_TRIVY --format json $NEXUS_URL_DEV/dsis-1/${CI_PROJECT_NAME}:$VERSION --scanners vuln > trivy_report.json
+    - |
+      medium_count=$(jq '[.Results[]? | .Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' trivy_report.json)
+      high_count=$(jq '[.Results[]? | .Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy_report.json)
+      critical_count=$(jq '[.Results[]? | .Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy_report.json)
+      low_count=$(jq '[.Results[]? | .Vulnerabilities[]? | select(.Severity == "LOW")] | length' trivy_report.json)
+
+
+      # Exibe as contagens para depuração
+      echo "Contagem de vulnerabilidades MEDIUM: $medium_count"
+      echo "Contagem de vulnerabilidades HIGH: $high_count"
+      echo "Contagem de vulnerabilidades CRITICAL: $critical_count"
+      echo "Contagem de vulnerabilidades LOW: $low_count"
+
+      # Verifica as vulnerabilidades em qualquer severidade
+      if [ "$critical_count" -ge 80 ]; then
+          "O número de vulnerabilidades CRITICAL é de $critical_count! Revise as vulnerabilidades e execute novamente."
+          exit 1
+      elif [ "$high_count" -ge 80 ]; then
+          "O número de vulnerabilidades HIGH é de $high_count! Revise as vulnerabilidades e execute novamente."
+          exit 1
+      elif [ "$medium_count" -ge 80 ]; then
+          "O número de vulnerabilidades MEDIUM é de $medium_count! Revise as vulnerabilidades e execute novamente."
+          exit 1
+      elif [ "$low_count" -ge 100 ]; then
+          "O número de vulnerabilidades LOW é de $low_count! Revise as vulnerabilidades e execute novamente."
+          exit 1	  
+      else
+          echo "A verificação do Trivy passou dentro dos limites aceitáveis."
+      fi
+    
+    # Configurações para envio de e-mail
+    - |
+      echo "account gitlab" > /etc/msmtprc
+      echo "host $HOST_SMTP_ZAP" >> /etc/msmtprc
+      echo "port 587" >> /etc/msmtprc
+      echo "auth on" >> /etc/msmtprc
+      echo "user $USER_SMTP_ZAP" >> /etc/msmtprc
+      echo "password $PASSWORD_ZAP" >> /etc/msmtprc
+      echo "tls on" >> /etc/msmtprc
+      echo "tls_starttls on" >> /etc/msmtprc
+      echo "tls_certcheck off" >> /etc/msmtprc
+      echo "from $USER_SMTP_ZAP" >> /etc/msmtprc
+      echo "logfile /var/log/msmtp.log" >> /etc/msmtprc
+      echo "account default : gitlab" >> /etc/msmtprc
+    - chmod 600 /etc/msmtprc
+
+    # Enviar e-mail com o relatório do Trivy em formato de tabela e contagem de vulnerabilidades
+    - |
+      {
+        current_time=$(date "+%Y-%m-%d")
+        echo "Subject: Relatório de Vulnerabilidades Trivy - $current_time"
+        echo "To: $REMETENTE_EMAIL_ZAP"
+        echo "Content-Type: text/plain; charset=\"utf-8\""
+        echo ""
+        echo "Relatório de vulnerabilidades gerado em $current_time."
+        echo ""
+        echo "Resultados do Trivy (formato tabela):"
+        cat trivy_table.txt
+        echo ""
+        echo "Contagem de vulnerabilidades:"
+        echo "MEDIUM: $medium_count"
+        echo "HIGH: $high_count"
+        echo "CRITICAL: $critical_count"
+        echo ""
+        echo "Por favor, revise as vulnerabilidades."
+      } | msmtp -a gitlab -t
+  tags:
+    - docker
+  allow_failure: false  # Esta tarefa deve ser bem-sucedida
